@@ -1,83 +1,78 @@
 from gensim.models import KeyedVectors
-from collections import Counter
+from gensim.models.keyedvectors import BaseKeyedVectors
+from nltk.probability import FreqDist
+from nltk.probability import LaplaceProbDist
 from collections import OrderedDict
+from itertools import chain
 import numpy as np
+import nltk.probability
 import os
 import pickle
 
-SMOOTHING = 1
-
 class AlignedVectors:
-  def __init__(self, dir_path, models_path):
+  def __init__(self, vecs_path, data_path, min_count):
+    '''
+    Initialize class to track aligned geographic vector spaces
+    
+    Arguments:
+     * vecs_path - Path to directory containing word2vec-style text files
+     * data_path - Path to directory of text files ofwhite-spaced separated
+       tokens vectors are derived from, with matching geography file names
+     * min_count - The probability of a word with this frequency in the geography
+       with the least amount of training data becomes a lower bound on the
+       a word's maximum p(word|geo) for inclusion. MUST be at least word2vec
+       minimum frequency
+    '''
     self.vector_spaces = []
-    self.counts = []
     self.name2id = dict()
-    self.id2name = [] 
-    self.SEP = '￨'
+    self.id2name = []
+    freq_dists = []
+    prob_dists = []
     
-    self.type_freqs = None
-    self.token_counts = None
-    
-    self.geo_counts = None
-    self.geo_probs = None
-    self.geo_pmi = None
-    
-    if dir_path != None:
-      for f_name in os.listdir(dir_path):
-        self.__add_space(os.path.join(dir_path, f_name))
-        
-    self.build_geo_vectors(models_path, self.name2id)
-  
-  def __add_space(self, f_path):
-    name = f_path.split(os.path.sep)[-1]
-    self.name2id[name] = len(self.vector_spaces)
-    self.id2name.append(name)
-    vector_space = KeyedVectors.load_word2vec_format(f_path)
-    self.vector_spaces.append(vector_space)
+    for f_name in os.listdir(vecs_path):
+      self.name2id[f_name] = len(self.id2name)
+      self.id2name.append(f_name)
       
-    print("Added", name)
-    
-    combined_names = [name + self.SEP + word for word in vector_space.index2word]
+      # Add vector space, frequency distribution for geography
+      self.vector_spaces.append(KeyedVectors.load_word2vec_format(os.path.join(vecs_path, f_name)))
+      print("Loaded " + f_name + " vectors")
+      freq_dists.append(FreqDist(chain(*[l.split() for l in open(os.path.join(data_path, f_name))])))
+      print("Built " + f_name + " frequency distribution")
       
-    self.combined_space.add(combined_names, vector_space.vectors)
+    self.num_geos = len(self.id2name)
     
-    print("Added", name, "to combined space")
-
-  def build_geo_vectors(self, models_path, name2id):
-    vocabs = []
-    dim = 0
-    for name in name2id:
-      vector_space = KeyedVectors.load(os.path.join(models_path, name))
-      dim = vector_space.vector_size
-      vocabs.append(vector_space.vocab)
-        
-    types = set(word for vocab in vocabs for word in vocab.keys())
-    type_freqs_unsorted = {word : sum(vocab[word].count if word in vocab else 0 for vocab in vocabs) for word in types}
-    self.type_freqs = OrderedDict(sorted(type_freqs_unsorted.items(), key=lambda p: (p[1], p[0]), reverse=True))
+    # p(word|geography) distributions for each geography, with Laplace smoothing
+    prob_dists = [LaplaceProbDist(fd) for fd in fr]
+    print("Built probability distributions")
     
-    # Token counts by geography
-    self.token_counts = np.array([sum(word_obj.count for word_obj in vocab.values()) for vocab in vocabs])
+    # Find the probability of a word with frequency min_count in the geographic region
+    # with the least data
+    min_prob = min(prob_dists, key = lambda pd: pd.freqdist.N()).prob(None)*(min_count + 1)
     
+    # Build vocab from items whose probs in most overrepresented vocabularies
+    # exceed threshold
+    # Allows exclusion of low-probability items that is not biased against geographies
+    # with less associated data
+    self.vocab = list({w for pd in prob_dists for w in pd.samples() if pd.prob(w) >= min_prob})
+    print("Loaded vocabulary")
     
-    # Matrix counting occurences of words in each geography
-    counts = np.array([np.array([vocabs[i][word].count if word in vocabs[i] else 0 for i in range(len(vocabs))]) for word, freq in self.type_freqs.items()])
+    self.geo_probs = BaseKeyedVectors(self.num_geos)
+    geo_probs.add(self.vocab, [np.array([pd[w] for pd in prob_dists]) for w in self.vocab])
+    print("Built probability vectors")
     
-    # p (word | geo), with additive smoothing
-    probs = np.array([np.array([(vocabs[i][word].count + SMOOTHING)/self.token_counts[i] if word in vocabs[i] else 0 for i in range(len(vocabs))]) for word, freq in self.type_freqs.items()])
-    
-    type_freqs_vec = np.array(list(self.type_freqs.values()))
-    log_num_tokens = np.log(np.sum(self.token_counts))
+    # pmi = log(p(word|geo)/p(word)) = log(p(word|geo)) - log(p(word))
+    # Let p(word) = avg p(word|geo) over all geographies
+    # allows equal weighting of each geographic vector space regardless of token count
+    pmi = np.log(geo_probs.vectors()) - np.log(geo_probs.vectors().mean(axis=1).reshape(-1, 1))
+    self.geo_pmi = KeyedVectors(self.num_geos)
+    self.geo_pmi.add(vocab, pmi)
+    print("Built PMI vectors")
     
     # log p(word, geo)/(p(word)p(geo)) = log p(word|geo)/p(word) = log(p(word|geo)) - log(p(word)) = log(p(word|geo)) - log(c(word)) + log(c(tokens))
-    pmi = np.log(probs) - np.log(type_freqs_vec).reshape(-1, 1) + log_num_tokens
+    # pmi = np.log(probs) - np.log(type_freqs_vec).reshape(-1, 1) + log_num_tokens
     
-    self.geo_counts = KeyedVectors(len(vocabs))
-    self.geo_probs = KeyedVectors(len(vocabs))
-    self.geo_pmi = KeyedVectors(len(vocabs))
-    
-    self.geo_counts.add(list(self.type_freqs.keys()), counts)
-    self.geo_probs.add(list(self.type_freqs.keys()), probs)
-    self.geo_pmi.add(list(self.type_freqs.keys()), pmi)
+  def save(self, f_path):
+    pickle.dump(self, open(f_path, "wb"))
     
   def __iter__(self):
     return iter(self.vector_spaces)
@@ -86,3 +81,11 @@ class AlignedVectors:
     if isinstance(key, str):
       return self.vector_spaces[self.name2id[key]]
     return self.vector_spaces[key]
+    
+def test():
+  print("Running test...")
+  x = AlignedVectors("vecs_aligned_nomin", "corpus", 100)
+  x.save("av.bin")
+  
+if __name__ == "__main__":
+  test()
