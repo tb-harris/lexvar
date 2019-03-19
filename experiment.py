@@ -1,96 +1,102 @@
 from aligned_vectors import AlignedVectors
 import numpy as np
-import sys
 import pickle
-from collections import OrderedDict
-x = None
+import sys
+from scipy.stats import zscore
+_n = 10
+
+def n_most_similar_to_given(V, entity1, entities_arr, n):
+  '''
+  Adaption of gensim similar_to_given to allow for
+  top n argument
+  '''
+  return entities_arr[np.argpartition([V.similarity(entity1, entity) if entity in V.vocab and entity != entity1 else 0 for entity in entities_arr], -n)[-n:]]
+  
+def get_pair(vocab, idx_flat):
+  return (vocab[idx_flat//len(vocab)], vocab[idx_flat%len(vocab)])
+  
+def words_by_matrix(vocab, matrix, topn, display = False):
+  idxs_topn_unsorted = np.argpartition(matrix, -topn, axis=None)[-topn:]
+  idxs_topn_sorted = idxs_topn_unsorted[np.argsort(matrix.take(idxs_topn_unsorted))]
+  if len(matrix.shape) == 1:
+    words = [vocab[idxs_topn_sorted[-i]] for i in range(1, topn + 1)]
+  else:
+    words = [get_pair(vocab, idxs_topn_sorted[-i]) for i in range(1, topn + 1)]
+  if display:
+    for i, w in enumerate(words):
+      print(i, w, matrix.take(idxs_topn_sorted[-(i + 1)]))
+      
+  return words
 
 if len(sys.argv) == 1:
-  x = AlignedVectors("vecs_aligned_nomin", "models_nomin")
+  x = AlignedVectors("vecs_aligned_nomin", "models_nomin", 50)
 else:
   x = pickle.load(open(sys.argv[1], "rb"))
-
-CUTOFF_PMI_UNDERREP = np.log(.6)
-CUTOFF_PMI_OVERREP = np.log(1.2)
-SIM_THRESHOLD = .5
-SIM_TOPN_THRESHOLD = 1000
-MIN_FREQ = 10000
-
-num_geos = len(x.id2name)
-
-log_num_tokens = np.log(np.sum(x.token_counts))
-def pmi(p_word_geo, count_word):
-  return np.log(p_word_geo) - np.log(count_word) + log_num_tokens
-
-poss_words = OrderedDict()
-
-# Iterate over all words
-for word, freq in x.type_freqs.items():
-  if freq < MIN_FREQ:
-    break
-  v_pmi = x.geo_pmi[word] # Vector of pointwise mutual information for each word, geo
-  geos_underrep = np.where(v_pmi <= CUTOFF_PMI_UNDERREP)[0]
-  geos_overrep = np.where(v_pmi >= CUTOFF_PMI_OVERREP)[0]
-  geos_0plus = np.where(v_pmi >= 0)[0]
   
-  # Skip word if it does not appear to be a possible dominant lexical variation
-  if not (len(geos_underrep) > 0 and len(geos_underrep) < 5):
-    continue
-    
-  # Average of embeddings in spaces with above-average representation
-  v_dominant = np.mean([x.vector_spaces[i][word] for i in np.where(v_pmi >= 0)[0]], axis=0)
-  
-  # List of sets of possible variants in each space where word is underrepresented
-  complements = []
-  
-  print(freq) # progress output
-  
-  # Iterate over geography index, geographic vector spaces
-  for g, V in enumerate(x.vector_spaces):
-    # Skip spaces where vector is not underreepresented
-    if v_pmi[g] > CUTOFF_PMI_UNDERREP:
-     continue
-     
-    complements.append(set())
-     
-    for w_sim, sim in V.similar_by_vector(v_dominant, topn=SIM_TOPN_THRESHOLD):
-      if sim < SIM_THRESHOLD:
-        break
-        
-      # Prevents inclusion of word itself as variant
-      if w_sim == word:
-        continue
-      
-      # TODO: Attempts to exclude words with region-specific references by comparing geographic distribution of surrounding words
+vocab = np.array(x.vocab)
+word2id = {w: i for i, w in enumerate(x.vocab)}
 
-      
-      if x.geo_pmi[w_sim][g] >= CUTOFF_PMI_OVERREP:
-        pmi_w = x.geo_pmi[word]
-        pmi_sim = x.geo_pmi[w_sim]
-        pmi_combined = pmi(x.geo_probs[word] + x.geo_probs[w_sim], x.type_freqs[word] + x.type_freqs[w_sim])
-        
-        #if pmi_combined[g] > pmi_w[g] and pmi_combined[g] < pmi_sim[g]:
-        if pmi_combined.std() < pmi_w.std() and pmi_combined.std() < pmi_sim.std():
-          print("included", word, w_sim)
-          complements[-1].add((w_sim, pmi_mod))
-        else:
-          print("excluded", word, w_sim)
-  
-  C = set.intersection(*complements)
-  for w_sim in C:
-    pmi_sim = x.geo_pmi[w_sim]
-    pmi_combined = pmi(x.geo_probs[word] + x.geo_probs[w_sim], x.type_freqs[word] + x.type_freqs[w_sim])
-    
-    pmi_mod = (pmi_w.std() - pmi_combined.std()) + (pmi_sim.std() - pmi_combined.std())
-    
-    numpy.array([numpy.array(x.vector_spaces[i].similar_by_vector(x.vector_spaces[j]. for j in range(num_geos)]) for i in range(num_geos)])
-    
-    poss_words[word] = C
-          
-        
-    
-  #std = pmi.std() # Standard deviation of PMI vec
-  #poss_words.append((std, word, freq))
-    
-# print((sorted(poss_words.items(), key = lambda w : len([s for s in poss_words[w][1] if len(s) > 0])/len(poss_words[w][))))
+# 
+even_dist = np.ones(x.num_geos) / np.linalg.norm(x.num_geos)
+probs_norm = x.probs.vectors / np.linalg.norm(x.probs.vectors, axis=1).reshape(-1, 1)
 
+# Variability [word]
+# Score of to what degree geography conditions probability of word
+# variability = np.mean(np.abs(x.pmi.vectors), axis = 1)
+variability = 1 - np.matmul(probs_norm, even_dist)
+
+# Specificity [word]
+# Score that reflects the degree to which similar words condition the probability of words
+# Reliant on previously computed variability scores
+# Takes a while to compute
+if not len(sys.argv) >= 3:
+  specificity = np.zeros(len(vocab))
+  for i, w in enumerate(vocab):
+    neighbors = n_most_similar_to_given(x[np.argmax(x.pmi[w])], w, vocab, _n)
+    variability_neighbors = variability[np.array([word2id[nbr] for nbr in neighbors])]
+    score = np.mean(variability_neighbors)
+    specificity[i] = score
+else:
+  specificity = pickle.load(open(sys.argv[2], "rb"))
+
+# Similarity [word pair]
+# Score that reflects the similarity between 
+# Build matrix of normalized vectors for each word in most dominant space
+vectors_dominant = np.array([x[np.argmax(x.pmi[w])].word_vec(w)/np.linalg.norm(x[np.argmax(x.pmi[w])].word_vec(w)) for w in vocab])
+similarity = np.matmul(vectors_dominant, vectors_dominant.transpose())
+# del vectors_dominant
+# S = similarity
+# del similarity
+
+# Complementarity [word pair]
+complementarity = np.zeros((len(vocab), len(vocab)))
+for i, w in enumerate(vocab):
+  probs_additive = x.probs.vectors + x.probs.vectors[i]
+  probs_additive_normed = probs_additive / np.linalg.norm(probs_additive, axis=1).reshape(-1, 1)
+  complementarity[i] = np.matmul(probs_additive_normed, even_dist)
+
+'''  
+# Simple feature intersection
+n = .3
+w_v = words_by_matrix(vocab, variability, int(np.size(variability)*n))
+w_sp = words_by_matrix(vocab, 1 - specificity, int(np.size(specificity)*n))
+wp_sm = words_by_matrix(vocab, similarity, int(np.size(similarity)*n))
+wp_c = words_by_matrix(vocab, complementarity, int(np.size(complementarity)*n))
+
+intr = [(w1, w2) for (w1, w2) in wp_c if w1 in w_sp and w2 in w_sp and w1 in w_v and w2 in w_v and (w1, w2) in wp_sm]
+print(intr)
+'''
+  
+# Feature weighting
+
+w_var = 1
+w_spec = 1
+w_sim = 1
+w_comp = 1
+
+# variability[w1] + variability[w2] + specificity[w1] + specificity[w2] + similarity[w1, w2] + complementarity[w1, w2]
+S = w_sim*similarity + w_comp*complementarity + (w_var/2)*variability + (w_var/2)*variability.reshape((-1, 1)) + (w_spec/2)*(1 - specificity) + (w_spec/2)*(1 - specificity).reshape((-1, 1))
+
+# eliminate symmetrical 
+S *= 1 - np.tril(np.ones((len(vocab), len(vocab))))
+top500 = words_by_matrix(vocab, S, 500, True)

@@ -26,8 +26,8 @@ class AlignedVectors:
     self.vector_spaces = []
     self.name2id = dict()
     self.id2name = []
+    
     freq_dists = []
-    prob_dists = []
     
     for f_name in os.listdir(vecs_path):
       self.name2id[f_name] = len(self.id2name)
@@ -36,18 +36,26 @@ class AlignedVectors:
       # Add vector space, frequency distribution for geography
       self.vector_spaces.append(KeyedVectors.load_word2vec_format(os.path.join(vecs_path, f_name)))
       print("Loaded " + f_name + " vectors")
-      freq_dists.append(FreqDist(chain(*[l.split() for l in open(os.path.join(data_path, f_name))])))
+      # freq_dists.append(FreqDist(chain(*[l.split() for l in open(os.path.join(data_path, f_name))])))
+      fd = FreqDist()
+      
+      for l in open(os.path.join(data_path, f_name)):
+        for w in l.split():
+          fd[w] += 1
+          
       print("Built " + f_name + " frequency distribution")
+      
+      freq_dists.append(fd)
       
     self.num_geos = len(self.id2name)
     
     # p(word|geography) distributions for each geography, with Laplace smoothing
-    prob_dists = [LaplaceProbDist(fd) for fd in fr]
+    prob_dists = [LaplaceProbDist(fd) for fd in freq_dists]
     print("Built probability distributions")
     
     # Find the probability of a word with frequency min_count in the geographic region
     # with the least data
-    min_prob = min(prob_dists, key = lambda pd: pd.freqdist.N()).prob(None)*(min_count + 1)
+    min_prob = min(prob_dists, key = lambda pd: pd.freqdist().N()).prob(None)*(min_count + 1)
     
     # Build vocab from items whose probs in most overrepresented vocabularies
     # exceed threshold
@@ -56,16 +64,16 @@ class AlignedVectors:
     self.vocab = list({w for pd in prob_dists for w in pd.samples() if pd.prob(w) >= min_prob})
     print("Loaded vocabulary")
     
-    self.geo_probs = BaseKeyedVectors(self.num_geos)
-    geo_probs.add(self.vocab, [np.array([pd[w] for pd in prob_dists]) for w in self.vocab])
+    self.probs = BaseKeyedVectors(self.num_geos)
+    self.probs.add(self.vocab, [np.array([pd.prob(w) for pd in prob_dists]) for w in self.vocab])
     print("Built probability vectors")
     
     # pmi = log(p(word|geo)/p(word)) = log(p(word|geo)) - log(p(word))
     # Let p(word) = avg p(word|geo) over all geographies
     # allows equal weighting of each geographic vector space regardless of token count
-    pmi = np.log(geo_probs.vectors()) - np.log(geo_probs.vectors().mean(axis=1).reshape(-1, 1))
-    self.geo_pmi = KeyedVectors(self.num_geos)
-    self.geo_pmi.add(vocab, pmi)
+    pmi = np.log(self.probs.vectors) - np.log(self.probs.vectors.mean(axis=1).reshape(-1, 1))
+    self.pmi = KeyedVectors(self.num_geos)
+    self.pmi.add(self.vocab, pmi)
     print("Built PMI vectors")
     
     # log p(word, geo)/(p(word)p(geo)) = log p(word|geo)/p(word) = log(p(word|geo)) - log(p(word)) = log(p(word|geo)) - log(c(word)) + log(c(tokens))
@@ -84,7 +92,7 @@ class AlignedVectors:
     
 def test():
   print("Running test...")
-  x = AlignedVectors("vecs_aligned_nomin", "corpus", 100)
+  x = AlignedVectors("vecs_aligned_nomin", "corpus", 50)
   x.save("av.bin")
   
 if __name__ == "__main__":
