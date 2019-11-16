@@ -8,6 +8,8 @@ import math
 from argparse import ArgumentParser
 from time import time
 
+metro_names_short = ["lasvegas", "phoenix", "charlotte", "pittsburgh", "cleveland", "madison", "calgary", "toronto", "champaign", "montreal"]
+
 p = ArgumentParser("Extract reviews and features from Yelp corpus")
 
 p.add_argument("dataset_path", help="Path to Yelp dataset directory")
@@ -15,10 +17,10 @@ p.add_argument("--review_structure", choices=["merged", "geo"], help="Merge revi
 p.add_argument("--geo_output", choices=["name", "id"], help = "Identify geographies by name or numerical ID", default="name")
 p.add_argument("--output_reviews", help="Path to reviews output file (merged mode only)", default="./reviews.untok")
 p.add_argument("--output_geo", help="Path to geography feature output file (merged mode only)", default="./geos.feat")
-p.add_argument("--output_dir", help="Directory for geographic review files (geo mode only)", default = "./reviews/")
+p.add_argument("--output_dir", help="Directory for geographic review files (geo mode only)", default = "./untokenized/")
+p.add_argument("--delim", help="String appended to end of each review", default="\n\n")
 p.add_argument("--limit", help="Only process the first n reviews, for testing", type=int, default=-1)
-p.add_argument("--exclude", help="Space-separated list of geographies to exclude", choices=["lasvegas", "phoenix", "charlotte", "pittsburgh", "cleveland", "madison", "calgary", "toronto", "champaign-urbana", "montreal"], nargs="+", default=[])
-# p.add_argument("--feat_files", help="Separate reviews into file for each feature value", action='store_true')
+p.add_argument("--exclude", help="Space-separated list of geographies to exclude", choices=metro_names_short + [None], nargs="*", default=[])
 
 args = p.parse_args()
 
@@ -80,20 +82,21 @@ metro_centroids = [
   (35.187295,	-80.867491),
   (40.434338,	-79.828061),
   (41.760392,	-81.724217),
-  (43.084288,	-89.597178),rev
+  (43.084288,	-89.597178),
   (51.025327, -114.049868),
   (43.654000, -79.387200),
-  (45.497216, -73.610364),
-  (40.234489,	-88.298623)
+  (40.234489,	-88.298623),
+  (45.497216, -73.610364)
 ]
 
-metros = metro_names if args.geo_output == "name" else list(range(0, len(metro_names))
+geos = metro_names if args.geo_output == "name" else list(range(0, len(metro_names)))
+exclude = [i for i, metro in enumerate(metro_names_short) if metro in args.exclude]
 
 if args.review_structure == "merged":
   rev = open(args.output_reviews, "w")
   geo = open(args.output_geo, "w")
 else:
-  corpus = [open(os.path.join(output_path, metro_name), "w") for metro_name in metros]
+  corpus = [open(os.path.join(args.output_dir, metro_name), "w") if metro_name not in exclude else None for i, metro_name in enumerate(geos)]
 
 # Build business to metro cluster mappings
 business2metro = dict()
@@ -116,10 +119,10 @@ for i, s_json in enumerate(open(os.path.join(args.dataset_path, "review.json")))
   review = json.loads(s_json.strip())
   
   geo_id = business2metro[review['business_id']]
-  if geo_id in args.exclude:
+  if geo_id in exclude:
     continue
   
-  text = review['text'].replace("\n", "\t") + "\n"
+  text = review['text'].replace("\n", "\t") + args.delim
   geography = str(geos[geo_id]) + "\n"
   
   if args.review_structure == "merged":
